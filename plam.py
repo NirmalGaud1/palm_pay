@@ -241,7 +241,7 @@ def main():
                     else:
                         st.error("Registration failed. Please try again.")
     
-    with tab3:
+   with tab3:
         st.header("Make a Payment")
         
         # Payment details
@@ -249,14 +249,23 @@ def main():
         amount = st.number_input("Amount (₹)", min_value=1.0, step=1.0)
         description = st.text_input("Description (optional)")
         
-        # Palm image upload for authentication
-        uploaded_file = st.file_uploader("Scan Your Palm", type=["jpg", "jpeg", "png"], key="payment_palm")
+        # Webcam capture for palm authentication
+        st.write("### Palm Authentication")
+        st.write("Position your palm in front of the camera and click 'Capture Image'")
         
-        if uploaded_file is not None:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Scanned Palm", width=300)
+        # Create two columns for webcam capture and preview
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Capture image from webcam
+            captured_image = st.camera_input("Scan Your Palm", key="payment_camera")
+        
+        # Payment button
+        if captured_image is not None:
+            image = Image.open(captured_image)
+            with col2:
+                st.image(image, caption="Captured Palm Image", width=300)
             
-            # Payment button
             if st.button("Authenticate & Pay"):
                 if not merchant_vpa or amount <= 0:
                     st.error("Please enter valid payment details")
@@ -277,34 +286,7 @@ def main():
                             )
                         
                         if payment_result["status"] == "success":
-                            st.success(f"Payment successful! Transaction ID: {payment_result['transaction_id']}")
-                            
-                            # Display transaction details
-                            st.write("### Transaction Details")
-                            st.write(f"**Amount:** ₹{amount}")
-                            st.write(f"**To:** {merchant_vpa}")
-                            st.write(f"**Transaction ID:** {payment_result['transaction_id']}")
-                            st.write(f"**Date & Time:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                            
-                            # Add a download button for receipt
-                            receipt_html = f"""
-                            <html>
-                            <body>
-                                <h2>Payment Receipt</h2>
-                                <p><b>Transaction ID:</b> {payment_result['transaction_id']}</p>
-                                <p><b>Amount:</b> ₹{amount}</p>
-                                <p><b>Merchant:</b> {merchant_vpa}</p>
-                                <p><b>Date & Time:</b> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-                                <p><b>Status:</b> Successful</p>
-                            </body>
-                            </html>
-                            """
-                            st.download_button(
-                                label="Download Receipt",
-                                data=receipt_html,
-                                file_name="payment_receipt.html",
-                                mime="text/html"
-                            )
+                            # ... (keep the success message and receipt generation unchanged)
                         else:
                             st.error(f"Payment failed: {payment_result.get('message', 'Unknown error')}")
                     else:
