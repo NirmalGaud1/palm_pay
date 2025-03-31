@@ -116,6 +116,10 @@ class PalmUPIPayment:
             "message": f"Payment of ₹{amount} to {merchant_vpa} successful"
         }
 
+import streamlit as st
+import time
+from PIL import Image
+
 def capture_palm(duration, purpose):
     """Webcam capture component with countdown"""
     if f"{purpose}_start" not in st.session_state:
@@ -129,15 +133,14 @@ def capture_palm(duration, purpose):
         remaining = duration - elapsed
 
         if remaining > 0:
-            with st.empty():
-                while remaining > 0:
-                    st.markdown(f"<h1 style='text-align: center; color: red;'>{int(remaining)}</h1>",
-                                 unsafe_allow_html=True)
-                    time.sleep(1)
-                    remaining -= 1
-                st.markdown("<h1 style='text-align: center;'>🎥</h1>", unsafe_allow_html=True)
-                st.rerun()
-        else:
+            time_placeholder = st.empty()
+            while remaining > 0:
+                time_placeholder.markdown(f"<h1 style='text-align: center; color: red;'>{int(remaining)}</h1>",
+                                         unsafe_allow_html=True)
+                time.sleep(1)
+                remaining -= 1
+            time_placeholder.markdown("<h1 style='text-align: center;'>🎥</h1>", unsafe_allow_html=True)
+
             # Capture image after countdown
             img_file = st.camera_input(f"Capture palm for {purpose}",
                                          key=f"camera_{purpose}")
@@ -146,6 +149,21 @@ def capture_palm(duration, purpose):
                 return Image.open(img_file)
             else:
                 st.session_state[f"{purpose}_start"] = None # Reset state if no image captured
+        else:
+            # Capture image if countdown finished (shouldn't be needed with the above logic)
+            img_file = st.camera_input(f"Capture palm for {purpose}",
+                                         key=f"camera_{purpose}")
+            if img_file:
+                st.session_state[f"{purpose}_start"] = None
+                return Image.open(img_file)
+            else:
+                st.session_state[f"{purpose}_start"] = None # Reset state if no image captured
+    else:
+        # Show the button only when not capturing
+        if st.button(f"Start {purpose.capitalize()} Capture"):
+            st.session_state[f"{purpose}_start"] = time.time()
+            st.rerun() # Rerun to start the countdown
+
     return None
 
 def main():
