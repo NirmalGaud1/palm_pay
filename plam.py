@@ -1,16 +1,22 @@
 import streamlit as st
 import cv2
 import numpy as np
-import json
-import requests
+import mediapipe as mp
 import hashlib
 import datetime
 import time
-import os
-import base64
 from cryptography.fernet import Fernet
 from PIL import Image
-from io import BytesIO
+import io
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(
+    static_image_mode=True,
+    max_num_hands=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.5
+)
 
 # Set page configuration
 st.set_page_config(
@@ -21,7 +27,7 @@ st.set_page_config(
 
 # Configuration settings
 CONFIG = {
-    "upi_gateway_url": "https://api.upipayment.com/transaction",  # Example URL
+    "upi_gateway_url": "https://api.upipayment.com/transaction",
     "merchant_id": "MERCHANT123456",
     "timeout_seconds": 30,
     "retry_attempts": 3
@@ -36,10 +42,29 @@ class PalmUPIPayment:
             st.session_state.encryption_key = Fernet.generate_key()
         
         self.cipher_suite = Fernet(st.session_state.encryption_key)
+    
+    def _extract_palm_features(self, palm_image):
+        """Extract palm features using MediaPipe Hand Landmarks"""
+        img_array = np.array(palm_image)
+        results = hands.process(cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR))
         
+        if not results.multi_hand_landmarks:
+            return None
+        
+        # Extract and normalize landmarks
+        hand_landmarks = results.multi_hand_landmarks[0]
+        features = []
+        for landmark in hand_landmarks.landmark:
+            features.extend([landmark.x, landmark.y, landmark.z])
+        
+        return features
+    
     def register_new_palm(self, user_id, palm_image):
         palm_features = self._extract_palm_features(palm_image)
-        palm_hash = hashlib.sha256(str(palm_features).encode()).hexdigest()
+        if palm_features is None:
+            return {"status": "error", "message": "No hand detected in image"}
+        
+        palm_hash = hashlib.sha256(np.array(palm_features).tobytes()).hexdigest()
         encrypted_upi_id = self.cipher_suite.encrypt(user_id["upi_id"].encode())
         
         st.session_state.palm_db[palm_hash] = {
@@ -51,52 +76,40 @@ class PalmUPIPayment:
         
         return {"status": "success", "palm_id": palm_hash}
     
-    def _extract_palm_features(self, palm_image):
-        gray = cv2.cvtColor(np.array(palm_image), cv2.COLOR_RGB2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                     cv2.THRESH_BINARY_INV, 11, 2)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    def _match_palm_features(self, features1, features2):
+        """Compare palm features using cosine similarity"""
+        if features1 is None or features2 is None:
+            return 0
         
-        key_points = []
-        for contour in contours:
-            if cv2.contourArea(contour) > 100:
-                moments = cv2.moments(contour)
-                if moments["m00"] != 0:
-                    cx = int(moments["m10"] / moments["m00"])
-                    cy = int(moments["m01"] / moments["m00"])
-                    key_points.append((cx, cy))
+        vec1 = np.array(features1)
+        vec2 = np.array(features2)
         
-        return key_points
+        # Handle potential different lengths
+        min_length = min(len(vec1), len(vec2))
+        vec1 = vec1[:min_length]
+        vec2 = vec2[:min_length]
+        
+        # Cosine similarity
+        cosine_sim = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+        return (cosine_sim + 1) / 2  # Normalize to 0-1 range
     
     def authenticate_palm(self, palm_image):
         presented_features = self._extract_palm_features(palm_image)
+        if presented_features is None:
+            return {"status": "failed", "message": "No hand detected"}
+        
         best_match = None
         best_score = 0
         
         for palm_id, data in st.session_state.palm_db.items():
             score = self._match_palm_features(presented_features, data["palm_features"])
-            if score > best_score and score > 0.8:
+            if score > best_score and score > 0.65:  # Adjusted threshold
                 best_score = score
                 best_match = palm_id
         
-        return {"status": "authenticated", "palm_id": best_match, "score": best_score} if best_match else {"status": "failed", "message": "Palm not recognized"}
-    
-    def _match_palm_features(self, features1, features2):
-        if not features1 or not features2:
-            return 0
-            
-        matches = 0
-        threshold = 10
-        
-        for p1 in features1:
-            for p2 in features2:
-                dist = np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
-                if dist < threshold:
-                    matches += 1
-                    break
-        
-        return matches / len(features1) if len(features1) > 0 else 0
+        if best_match:
+            return {"status": "authenticated", "palm_id": best_match, "score": best_score}
+        return {"status": "failed", "message": f"Palm not recognized (Score: {best_score:.2f})"}
     
     def initiate_payment(self, palm_id, amount, merchant_vpa, description=""):
         if palm_id not in st.session_state.palm_db:
@@ -105,15 +118,6 @@ class PalmUPIPayment:
         user_data = st.session_state.palm_db[palm_id]
         upi_id = self.cipher_suite.decrypt(user_data["encrypted_upi_id"]).decode()
         transaction_id = f"TXN{int(time.time())}{user_data['user_id'][-4:]}"
-        
-        payment_request = {
-            "transaction_id": transaction_id,
-            "payer_vpa": upi_id,
-            "payee_vpa": merchant_vpa,
-            "amount": amount,
-            "description": description,
-            "merchant_id": CONFIG["merchant_id"]
-        }
         
         return {
             "status": "success",
@@ -124,121 +128,186 @@ class PalmUPIPayment:
 def main():
     payment_system = PalmUPIPayment()
     
+    # Initialize session states for webcam capture
+    if 'countdown' not in st.session_state:
+        st.session_state.countdown = 10
+    if 'registration_image' not in st.session_state:
+        st.session_state.registration_image = None
+    if 'is_capturing' not in st.session_state:
+        st.session_state.is_capturing = False
+    
     st.title("Palm UPI Payment System")
     tab1, tab2, tab3 = st.tabs(["Home", "Register", "Make Payment"])
     
     with tab1:
         st.header("Welcome to Palm UPI")
-        st.write("""
-        This innovative payment system allows you to make UPI payments using your palm print as authentication.
+        st.markdown("""
+        Secure UPI payments using palm recognition technology.
         
         ### How it works:
         1. **Register**: Link your UPI ID with your palm print
-        2. **Pay**: Simply scan your palm to authenticate and make payments
+        2. **Pay**: Scan your palm to authenticate transactions
         
         ### Benefits:
-        - No need to remember UPI IDs or passwords
-        - Quick and secure transactions
+        - Biometric security
+        - Instant transactions
         - Contactless payments
         """)
         st.image("https://via.placeholder.com/600x400?text=Palm+Auth+Demo", 
-                 use_column_width=True, 
-                 caption="Palm Authentication Technology")
+                 caption="Palm Authentication Interface",
+                 use_container_width=True)
     
     with tab2:
-        st.header("Register Your Palm")
-        user_name = st.text_input("Full Name")
-        user_id = st.text_input("User ID (e.g., mobile number)")
-        upi_id = st.text_input("UPI ID (e.g., username@upi)")
-        uploaded_file = st.file_uploader("Upload Palm Image", type=["jpg", "jpeg", "png"])
-        
-        if uploaded_file is not None:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Palm Image", width=300)
+        st.header("Palm Registration")
+        with st.form("registration_form"):
+            user_name = st.text_input("Full Name")
+            user_id = st.text_input("Mobile Number")
+            upi_id = st.text_input("UPI ID (e.g., username@bank)")
             
-            if st.button("Register Palm"):
-                if not all([user_name, user_id, upi_id]):
-                    st.error("Please fill in all user information")
+            # Form submit button
+            submit_pressed = st.form_submit_button("Start Palm Capture")
+        
+        # Handle palm capture outside the form
+        if submit_pressed:
+            if not all([user_name, user_id, upi_id]):
+                st.error("Please fill all fields")
+            else:
+                st.session_state.is_capturing = True
+                st.session_state.countdown = 10
+        
+        # Palm capture process
+        if st.session_state.is_capturing:
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                camera_placeholder = st.empty()
+                captured_image = camera_placeholder.camera_input("Position your palm in frame", key="palm_register")
+                
+            with col2:
+                timer_placeholder = st.empty()
+                timer_placeholder.info(f"Time remaining: {st.session_state.countdown} seconds")
+                
+            if captured_image:
+                if st.session_state.countdown > 0:
+                    time.sleep(1)
+                    st.session_state.countdown -= 1
+                    timer_placeholder.info(f"Time remaining: {st.session_state.countdown} seconds")
+                    st.experimental_rerun()
                 else:
-                    user_data = {"user_id": user_id, "user_name": user_name, "upi_id": upi_id}
-                    with st.spinner("Processing palm registration..."):
-                        result = payment_system.register_new_palm(user_data, image)
+                    st.session_state.registration_image = captured_image
+                    st.session_state.is_capturing = False
+                    
+                    # Process registration
+                    image = Image.open(st.session_state.registration_image)
+                    result = payment_system.register_new_palm(
+                        {"user_id": user_id, "upi_id": upi_id},
+                        image
+                    )
                     
                     if result["status"] == "success":
-                        st.success(f"Palm registered successfully! Your Palm ID: {result['palm_id'][:8]}...")
-                        st.session_state.last_registered_palm = result["palm_id"]
+                        st.success(f"Registration successful! Palm ID: {result['palm_id'][:8]}...")
                     else:
-                        st.error("Registration failed. Please try again.")
+                        st.error(result.get("message", "Registration failed"))
+                    
+                    # Reset for next registration
+                    st.session_state.registration_image = None
     
     with tab3:
-        st.header("Make a Payment")
-        merchant_vpa = st.text_input("Merchant UPI ID")
-        amount = st.number_input("Amount (₹)", min_value=1.0, step=1.0)
-        description = st.text_input("Description (optional)")
+        st.header("Make Payment")
         
-        st.write("### Palm Authentication")
-        st.write("Position your palm in front of the camera and click 'Capture Image'")
+        col1, col2 = st.columns([2, 1])
         
-        captured_image = st.camera_input("Scan Your Palm", key="payment_camera")
+        with col1:
+            merchant_vpa = st.text_input("Merchant UPI ID")
+            amount = st.number_input("Amount (₹)", min_value=1.0, step=1.0)
+            description = st.text_input("Payment Note (optional)")
         
-        if captured_image is not None:
-            image = Image.open(captured_image)
-            st.image(image, caption="Captured Palm Image", width=300)
-            
-            if st.button("Authenticate & Pay"):
-                if not merchant_vpa or amount <= 0:
-                    st.error("Please enter valid payment details")
-                else:
-                    with st.spinner("Authenticating your palm..."):
-                        auth_result = payment_system.authenticate_palm(image)
+        with col2:
+            st.info("Scan your palm to authenticate and process payment")
+        
+        st.write("### Palm Scan")
+        captured_image = st.camera_input("Position your palm in frame")
+        
+        if captured_image and merchant_vpa and amount > 0:
+            # Show processing indicator
+            with st.spinner("Processing palm authentication..."):
+                # Create progress bar
+                progress_bar = st.progress(0)
+                
+                # Simulate processing time
+                for percent_complete in range(0, 101, 20):
+                    time.sleep(0.1)
+                    progress_bar.progress(percent_complete)
+                
+                image = Image.open(captured_image)
+                auth_result = payment_system.authenticate_palm(image)
+                
+                progress_bar.progress(100)
+                time.sleep(0.5)
+                
+                if auth_result["status"] == "authenticated":
+                    st.success(f"Authentication Success (Score: {auth_result['score']:.2f})")
                     
-                    if auth_result["status"] == "authenticated":
-                        st.success(f"Authentication successful! Match score: {auth_result['score']:.2f}")
+                    # Process payment with progress animation
+                    with st.spinner("Processing payment..."):
+                        payment_progress = st.progress(0)
+                        for percent_complete in range(0, 101, 10):
+                            time.sleep(0.1)
+                            payment_progress.progress(percent_complete)
                         
-                        with st.spinner("Processing payment..."):
-                            payment_result = payment_system.initiate_payment(
-                                auth_result["palm_id"],
-                                amount,
-                                merchant_vpa,
-                                description
-                            )
+                        payment_result = payment_system.initiate_payment(
+                            auth_result["palm_id"],
+                            amount,
+                            merchant_vpa,
+                            description
+                        )
                         
                         if payment_result["status"] == "success":
-                            st.success(f"Payment successful! Transaction ID: {payment_result['transaction_id']}")
-                            st.write("### Transaction Details")
-                            st.write(f"**Amount:** ₹{amount}")
-                            st.write(f"**To:** {merchant_vpa}")
-                            st.write(f"**Transaction ID:** {payment_result['transaction_id']}")
-                            st.write(f"**Date & Time:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                            st.balloons()
+                            st.success("Payment Successful!")
                             
-                            receipt_html = f"""
-                            <html><body>
-                                <h2>Payment Receipt</h2>
-                                <p><b>Transaction ID:</b> {payment_result['transaction_id']}</p>
-                                <p><b>Amount:</b> ₹{amount}</p>
-                                <p><b>Merchant:</b> {merchant_vpa}</p>
-                                <p><b>Date:</b> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-                                <p><b>Status:</b> Successful</p>
-                            </body></html>
-                            """
-                            st.download_button(
-                                label="Download Receipt",
-                                data=receipt_html,
-                                file_name="payment_receipt.html",
-                                mime="text/html"
-                            )
+                            # Create expandable transaction details
+                            with st.expander("Transaction Details", expanded=True):
+                                st.markdown(f"""
+                                **Transaction Details**
+                                - Amount: ₹{amount}
+                                - Recipient: {merchant_vpa}
+                                - Transaction ID: `{payment_result['transaction_id']}`
+                                - Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                                """)
+                                
+                                # Receipt generation
+                                receipt = f"""
+                                <html>
+                                    <body>
+                                        <h1>Payment Receipt</h1>
+                                        <p><b>Status:</b> Successful</p>
+                                        <p><b>Amount:</b> ₹{amount}</p>
+                                        <p><b>To:</b> {merchant_vpa}</p>
+                                        <p><b>Transaction ID:</b> {payment_result['transaction_id']}</p>
+                                        <p><b>Date:</b> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                                    </body>
+                                </html>
+                                """
+                                st.download_button(
+                                    "Download Receipt",
+                                    data=receipt,
+                                    file_name="payment_receipt.html",
+                                    mime="text/html"
+                                )
                         else:
-                            st.error(f"Payment failed: {payment_result.get('message', 'Unknown error')}")
-                    else:
-                        st.error("Authentication failed. Palm not recognized.")
-    
+                            st.error("Payment failed: " + payment_result.get("message", "Unknown error"))
+                else:
+                    st.error("Authentication failed: " + auth_result.get("message", "Unknown error"))
+
     if st.session_state.palm_db:
-        st.sidebar.header("Registered Palms")
+        st.sidebar.header("Registered Users")
         for palm_id, data in st.session_state.palm_db.items():
-            st.sidebar.write(f"**User:** {data['user_id']}")
-            st.sidebar.write(f"**Palm ID:** {palm_id[:8]}...")
-            st.sidebar.write(f"**Registered:** {data['registration_date']}")
-            st.sidebar.write("---")
+            st.sidebar.markdown(f"""
+            **User:** {data['user_id']}  
+            **Palm ID:** `{palm_id[:8]}...`  
+            **Registered:** {data['registration_date'][:10]}
+            """)
 
 if __name__ == "__main__":
     main()
