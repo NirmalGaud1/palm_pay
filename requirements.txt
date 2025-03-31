@@ -4,3 +4,4 @@ pillow
 numpy 
 cryptography
 mediapipe
+cv2
