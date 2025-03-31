@@ -83,19 +83,22 @@ class PalmUPIPayment:
         return np.dot(vec1[:min_length], vec2[:min_length]) / (np.linalg.norm(vec1[:min_length]) * np.linalg.norm(vec2[:min_length]))
     
     def authenticate_palm(self, palm_image):
-        presented_features = self._extract_palm_features(palm_image)
-        if presented_features is None:
-            return {"status": "failed", "message": "No hand detected"}
-        
-        best_match = None
-        best_score = 0
-        for palm_id, data in st.session_state.palm_db.items():
-            score = self._match_palm_features(presented_features, data["palm_features"])
-            if score > best_score and score > 0.65:
-                best_score = score
-                best_match = palm_id
-        
-        return {"status": "authenticated", "palm_id": best_match, "score": best_score} if best_match else {"status": "failed", "message": f"Score: {best_score:.2f}"}
+    presented_features = self._extract_palm_features(palm_image)
+    if presented_features is None:
+        return {"status": "failed", "message": "No hand detected"}
+
+    best_match = None
+    best_score = 0
+    for palm_id, data in st.session_state.palm_db.items():
+        score = self._match_palm_features(presented_features, data["palm_features"])
+        if score > best_score and score > 0.65:
+            best_score = score
+            best_match = palm_id
+
+    if best_match:
+        return {"status": "authenticated", "palm_id": best_match, "score": best_score}
+    else:
+        return {"status": "failed", "message": f"Score: {best_score:.2f}"}
     
     def initiate_payment(self, palm_id, amount, merchant_vpa):
         if palm_id not in st.session_state.palm_db:
